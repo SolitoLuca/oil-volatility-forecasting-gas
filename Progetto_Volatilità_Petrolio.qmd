@@ -1,0 +1,1130 @@
+---
+title: |
+  \begin{center}
+  \vspace*{2cm}
+
+  {\Huge \textbf{Report of SMFQM (part 1)}} \\[4cm]
+
+  Luca Solito \\[2cm]
+  Matricola: 7159517 \\[2cm]
+  Corso di laurea: Statistica e Data Science \\[2cm]
+  Anno accademico: 2025–2026 \\[2cm]
+
+  Data di consegna: 09/02/2025
+
+  \vspace*{2cm}
+  \end{center}
+author: ""
+date: ""
+format:
+  pdf:
+    fontsize: 10pt
+    mainfont: "Times New Roman"
+    geometry: "margin=2cm"
+    keep-tex: true
+    number-sections: true 
+header-includes:
+  - \usepackage{parskip}    
+  - \setlength{\parskip}{0pt} 
+  - \setlength{\parindent}{0pt}  
+---
+
+\newpage
+
+<!-- OPERAZIONI PRELIMINARI --> 
+
+```{r}
+#| echo: false
+#| output: false
+
+#### Per pulire la memoria
+rm(list = ls())
+#### Pacchetti
+library(forecast)
+library(DescTools)
+if ("package:gasmodel" %in% search()) detach("package:gasmodel")
+if ("package:gasmodelx" %in% search()) detach("package:gasmodelx")
+library(gasmodelx)
+  
+#### File Funzioni
+source("C://Users//lucas//Desktop//LAUREA MAGISTRALE//MARKETING CIPOLLINI//SMFQM-Functions finale.R")
+```
+
+# Obiettivo dell'Analisi
+
+L’obiettivo dell’analisi è esaminare la volatilità del prezzo dei contratti futures del petrolio greggio negli Stati Uniti, costruendo un modello in grado di prevedere l'intensità delle sue fluttuazioni per il successivo mese finanziario. 
+
+<!-- SCARICAMENTO DEL DATASET E TRASFORMAZIONE IN CSV -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#library(quantmod)
+#data.xts<-getSymbols("CL=F",src= "yahoo", from = "2010-01-01", auto.assign = FALSE)
+
+#data<-data.frame(Date=index(data.xts),coredata(data.xts))
+#summary(data)
+#data<-data[,-7] #eliminata ultima va (non serve)
+#colnames(data)<-c("date","open","high","low","close","volume")
+
+#summary(data)
+#str(data)
+
+### pulizia del dataset ###
+#summary(data)
+#data<-na.omit(data) #elimino in primis le osservazioni con valori mancanti
+#data$N <-1:nrow(data) #aggiunta va che rappresenta il numero di osservazioni del dataset
+#View(data)
+
+# Salvo dataset in un file CSV:
+#write.csv(data, file = "petrolio_greggio.csv", row.names = FALSE)
+
+# Per verificare dove è stato salvato il file:
+#getwd()
+
+## carica file sempre cosi senno ogni volta si oggiorna con i nuovi dati giornalieri ##
+
+file <- "C://Users//lucas//Desktop//petrolio_greggio.csv"
+data <- read.table(file = file, header = TRUE, sep = ",",
+  na.strings = ".", check.names = FALSE)
+data$date <- as.Date(data$date, "%Y-%m-%d") #converte la data del file in un formato leggibile a R
+str(data)
+View(data)
+
+```
+
+<!-- CALCOLO GARRMAN-KLASS E IMPUTAZIONE VALORI MANCANTI -->
+
+```{r}
+#| echo: false
+#| output: false
+
+# PROBLEMA GENERALE FENOMENO: Nei giorni 2020-04-20 e 2020-04-21 il prezzo del petrolio greggio è diventato negativo a causa dello shock esogeno del COVID. Questo porta a ottenere problemi nei calcoli delle misure di volatilità standard, in quanto il logaritmom di una quantità negativa non ha souzione reale. Per non avere salti nella serie storica e problemi nel calcolo delle previsioni, ho imputato due valori ai due dati mancanti, cercando di mantenere inalterato lo shock, anche se ovviamente sarà sottostimato. Ho provato due strade:
+
+#1. imputazione tramite filtro di kalman
+#2. Winsorizzazione
+
+##################################################################################
+
+subset(data, close <= 0 | open <= 0) #NOTA! #2589,2590-> esattamente giorni 2020-04-20 e 2020-04-21
+
+## Funzione Garman-Klass ##
+calculate_gk <- function(h, l, o, c) {
+  # Protezione contro prezzi <= 0
+  if(any(c(h, l, o, c) <= 0)) return(NA)
+  
+  part1 <- 0.5 * (log(h/l))^2
+  part2 <- (2 * log(2) - 1) * (log(c/o))^2
+  return(sqrt(part1 - part2) * sqrt(252) * 100)
+}
+gk <- mapply(calculate_gk, data$high, data$low, data$open, data$close)
+which(is.na(gk))  #2589,2590-> esattamente i giorni 2020-04-20 e 2020-04-21:OK
+
+##### POSSIBILI IMPUTAZIONI NA ####
+
+## 1. Filtro di Kalman
+
+library(imputeTS)
+vol_completata <- na_kalman(gk, model = "auto.arima") #sotto questa specifica, la funzione utilizza la miglior combinazione ARIMA per imputare i valori mancanti della serie storica
+
+# Questo grafico mostra in rosso i valori che il filtro ha imputato:
+graficokalman <- ggplot_na_imputations(gk, vol_completata)
+saveRDS(graficokalman, "kalman.rds")
+vol_completata[2589]
+vol_completata[2590]
+
+## 2. winsorizzazione 99.9esimo percentile
+summary(gk)
+quantile(gk,probs=c(0.99,0.995,0.999), na.rm =TRUE)
+soglia<-quantile(gk,probs=0.999, na.rm =TRUE)
+gk[is.na(gk)] <- soglia
+gk[2589]
+gk[2590]
+
+#### SCELTA FINALE: USO VALORI IMPUTATI DA FILTRO DI KALMAN ####
+gk<-vol_completata
+length(is.na(gk))
+
+### La misura di volatilità Garman-Klass è stata annualizzate moltiplicandola per $\sqrt{252}$ (assumendo 252 giorni lavorativi in un anno) e scalata per 100 per esprimerla in percentuale. ####
+
+```
+
+<!-- COSTRUZIONE DI REGRESSORI ESTERNI: 3 POSSIBILI OPZIONI -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#####1. dummy giornaliere
+wd <- format(x = data$date, format = "%u") 
+xreg.d <- model.matrix(object = ~ wd)[, -1] 
+
+#####2.dummy mensili
+wd <- format(x = data$date, format = "%m")
+xreg.m <- model.matrix(object = ~ wd)[, -1] 
+
+#####3. dummy annuali
+wd <- format(x = data$date, format = "%Y")
+xreg.y <- model.matrix(object = ~ wd)[, -1] 
+
+```
+
+# Descrizione e Analisi dei dati
+
+I dati utilizzati riguardano i prezzi giornalieri, espressi in dollari per barile, dei contratti futures del petrolio greggio statunitense. I dati provengono da Yahoo Finance, punto di riferimento nel settore finanziario per il monitoraggio di asset, indici e listini borsistici mondiali.
+
+Come stimatore di volatilità dell'asset si è utilizzato Garman-Klass. Quest'ultimo fornisce una misura robusta e accurata delle fluttuazioni di prezzo, in quanto sfrutta l'intera struttura informativa giornaliera del titolo finanziario (Open, High, Low, Close). I valori mancanti di tale metrica, causati dai prezzi negativi dei futures relativi allo shock del COVID-19, sono stati imputati tramite il Filtro di Kalman.
+
+Il periodo coperto dai dati va dal "04-01-2010" al "28-01-2026", per un totale di 4042 osservazioni. 
+
+# Analisi Preliminare
+
+La Time Series (Figure 1) della volatilità di Garman-Klass mostra che gli spike di volatilità più marcati coincidono con significativi shock di mercato. L’episodio di maggiore intensità è riconducibile alla crisi pandemica da COVID-19, mentre un secondo evento di rilevante entità si osserva in concomitanza dell'inizio del conflitto russo-ucraino nel 2022.
+
+Dalla relativa ACF (Figure 1), si osserva che le autocorrelazioni partono da circa 0.8 e decrescono molto lentamente. Questo indica che la volatilità del petrolio è estremamente persistente, come generalmente accade per i titoli finanziari. 
+
+```{r}
+#| echo: false
+#| fig-cap: "TS plot & ACF volatilità Garman-Klass petrolio greggio USA"
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+## Separazione delle quantità rilevanti del dataset:
+y<-gk
+date<-data$date
+
+par(mfrow = c(1,2))
+
+## Esplorazione serie storica della volatilità garman-klass:
+plot(x = date, y = y, type = "l", xlab = "", ylab = "", main = "TS plot Garman-Klass Petrolio")
+
+## Fac esplorativa della serie storica della volatilità Garman-Klass, per identificare le caratteristiche principali della serie storica ##
+Acf(x = y, type = "correlation", lag.max = 50, main = "ACF Garman-Klass Petrolio")
+
+
+```
+
+<!-- SPLIT DEL DATASET: TOT, IN-SAMPLE, OUT-SAMPLE -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#### Dataset completo 
+date.tot <- date
+y.tot <- gk 
+xreg.d.tot <- xreg.d
+xreg.m.tot <- xreg.m
+xreg.y.tot <- xreg.y
+
+#### Out-of-sample data: utilizzata per valutare le previsioni del modello
+ind <- format(date, "%Y") %in% c("2025", "2026") 
+date.out <- date.tot[ind] 
+y.out <- y.tot[ind] 
+xreg.d.out <- xreg.d.tot[ind, , drop = FALSE]
+xreg.m.out <- xreg.m.tot[ind, , drop = FALSE]
+xreg.y.out <- xreg.y.tot[ind, , drop = FALSE]
+
+#### In-sample data: utilizzata per fittare il modello e produrre le previsioni
+ind <- !ind
+date <- date.tot[ind] 
+y <- y.tot[ind] 
+xreg.d <- xreg.d.tot[ind, , drop = FALSE]
+xreg.m <- xreg.m.tot[ind, , drop = FALSE]
+xreg.y <- xreg.y.tot[ind, , drop = FALSE]
+
+```
+
+Nonostante l'analisi grafica non mostri pattern di stagionalità definiti, sono state predisposte variabili dummy temporali (giornaliere, mensili e annuali) come potenziali regressori esterni, al fine di valutarne l'impatto nelle successive fasi di modellizzazione.
+
+I dati relativi al 2025 e al 2026 vengono esclusi in fase di stima del modello e utilizzati per l'analisi ex-post.
+
+
+# Stima del Modello
+
+Al fine di individuare il modello GAS più performante, si sono testate diverse parametrizzazioni. La selezione si è basata sul confronto della bontà di adattamento e complessità del modello tramite gli indici AIC e BIC, e attraverso l'analisi diagnostica dei residui moltiplicativi.
+Come  specifica di base si è adottata una distribuzione condizionata Gamma, definita dal parametro di forma $\alpha$ (shape) e dal parametro di tasso $\beta$ (rate).
+
+<!-- OTTIMIZZAZIONE -->
+
+```{r}
+#| echo: false
+#| output: false
+
+opts <- list(algorithm = "NLOPT_LN_NELDERMEAD", xtol_rel = 1e-6, maxeval = 1e+06)
+```
+
+
+<!-- MODELLI 1: solo regressori esterni  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+### dummy giornaliere
+fit1.1 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = xreg.d, regress = "joint",        
+  p = 0L, q = 0L, scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE)   
+
+fit1.1 #Log-Likelihood: -15652.65, AIC: 31317.31, BIC: 31354.72
+#commenti: la dummy beta4 è debolmente significativa
+
+### dummy mensili
+fit1.2 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = xreg.m, regress = "joint",        
+  p = 0L, q = 0L, scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE)   
+
+fit1.2 #Log-Likelihood: -15588.87, AIC: 31203.73, BIC: 31284.79
+#commenti: alcune dummy sono significative: beta2,3,4,6,11 -> 5 dummy significative
+
+### dummy annuali
+fit1.3 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = xreg.y, regress = "joint",        
+  p = 0L, q = 0L, scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE)   
+
+fit1.3 #Log-Likelihood: -14757.55, AIC: 29551.09, BIC: 29663.33
+#commenti: quasi tutte significative
+
+#### CONCLUSIONE: MANTENERE E TESTARE ULTERIORMENTE DUMMY ANNUALI ###
+
+```
+
+
+<!-- MODELLO 2: SOLO ARMA (1,1)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit2 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = NULL, regress = "joint",        
+  p = 1L, q = 1L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit2 #Log-Likelihood: -13808.91, AIC: 27625.82, BIC: 27650.76
+
+```
+
+
+<!-- MODELLO 3: SOLO ARMA (2,1)  --> 
+
+```{r}
+#| echo: false
+#| output: false
+
+fit3 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = NULL, regress = "joint",
+  p = 1L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit3 #Log-Likelihood: -13804.87, AIC: 27619.74, BIC: 27650.92
+
+```
+
+
+<!-- MODELLO 4: SOLO ARMA (1,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit4 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 1L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit4 #Log-Likelihood: -13802.54, AIC: 27615.09, BIC: 27646.26
+
+```
+
+
+<!-- MODELLO 5: SOLO ARMA (2,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit5 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit5 #Log-Likelihood: -13792.27, AIC: 27596.55, BIC: 27633.96
+
+## calcolo delle radici del modello ##
+fit5$fit$coef_est #pos 4,5
+stime<-fit5$fit$coef_est
+radici<-polyroot(c(1,-stime[4], -stime[5] ))
+radici<-abs(radici)
+radici
+
+##commento: entrambe le radici del polinomio caratteristico (1.013457 e 1.525238) sono in modulo superiori a 1. dunque il modello soddisfa la stazionaerietà debole. Questo conferma che l'effetto dei passati shock non "esplode" nel tempo ma tende a rientrare, rendendo le previsioni statisticamente affidabili. ##
+
+```
+
+
+<!-- MODELLO 6: ARMA (2,2) + DUMMY ANNUALI + JOINT -->
+
+```{r}
+#| echo: false
+#| output: false
+
+###Testate le dummy più rilevanti (annuali) insieme alla parte dinamica più rilevante (ARMA 2,2)
+fit6 <- gas(y = y, distr = "gamma", param = "rate", 
+  x = xreg.y, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit6
+#Modello 5: ARMA(2,2) -> Log-Likelihood: -13792.27, AIC: 27596.55, BIC: 27633.96
+#Modello 6: completo -> Log-Likelihood: -13776.1, AIC: 27596.21, BIC: 27733.38
+
+###CONCLUSIONE: Il fit del modello non migliora particolarmente rispetto a ARMA(2,2), anzi peggiora se consideriamo la complessità del modello (BIC), nonostante alcuni regressori siano rimasti significativi. Per questo conviene abbandonare le dummy annuali. Dunque, la specifica migliore generale per il modello è l' ARMA(2,2), nonostante i residui non siano perfettamente incorrelati, ma la correlazione che rimane è molto bassa (0.04). Ho provato anche la specifica "sep", ma i risultati peggiorano ancora di più.
+
+```
+
+Dopo aver testato modelli con solo regressori esterni, specifiche con solo parte dinamica della serie e configurazioni ibride, i risultati migliori sotto distribuzione Gamma sono emersi dalle parametrizzazioni prive di regressori esterni. In particolare, le specifiche GAS(1,1) e GAS(2,2) sono risultate le più rilevanti, con quest'ultima che mostra una capacità di adattamento ai dati leggermente superiore rispetto alla versione più parsimoniosa. I risultati sono i seguenti:
+
+- Gamma (1,1) -> Log-Likelihood: -13808.91, AIC: 27625.82, BIC: 27650.76;
+- Gamma (2,2) -> Log-Likelihood: -13792.27, AIC: 27596.55, BIC: 27633.96.
+
+\vspace{3mm}
+
+Table 1 riporta la stima, lo standard error, la statistica test, il p-value e le radici AR per il modello GAS(2,2) con distribuzione condizionata Gamma.
+
+\vspace{3mm}
+
+| Parametro          |      Stima | Std. Error | Statistica Test |    p-value |
+|--------------------|-----------:|-----------:|----------------:|-----------:|
+| log(rate)__omega   |  -0.005212 | 0.00096061 |         -5.4261 |  5.761e-08 |
+| log(rate)__alpha1  |   0.028019 | 0.00157410 |         17.8001 |  < 2.2e-16 |
+| log(rate)__alpha2  |  -0.022152 | 0.00166473 |        -13.3068 |  < 2.2e-16 |
+| log(rate)__phi1    |   1.642356 | 0.04749416 |         34.5802 |  < 2.2e-16 |
+| log(rate)__phi2    |  -0.646929 | 0.04710167 |        -13.7347 |  < 2.2e-16 |
+| shape              |   9.115614 | 0.20496534 |         44.4739 |  < 2.2e-16 |
+|--------------------|------------|------------|-----------------|-----------|
+| Radice AR 1        |   1.013457 |          - |               - |          - |
+| Radice AR 2        |   1.525238 |          - |               - |          - |
+
+: : Stima del Modello (2,2) con distribuzione condizionata Gamma, regress = "joint" e scaling = "unit"
+
+
+
+Data la natura moltiplicativa che caratterizza le distribuzioni definite "duration distributions", la verifica della corretta specifica è stata condotta attraverso l'analisi diagnostica dei residui moltiplicativi stimati. Di seguito sono presentate le relative ACF:
+
+
+<!-- DIAGNOSTICA DEI MODELLI GAMMA (1,1) E GAMMA (2,2) -->
+
+```{r}
+#| echo: false
+#| fig-cap: "ACF Residui Modelli Gamma (1,1) e Gamma (2,2)" 
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+#### GAMMA (1,1) ####
+fit <- fit2
+mu <- fitted(fit)
+eps.g1 <- y / mu #residui
+alpha <- fit$fit$coef_est["shape"]
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.g1, type = "l", xlab = "", ylab = "", main = "Gamma residuals")
+
+#### GAMMA (2,2) ####
+fit <- fit5
+mu <- fitted(fit)
+eps.g2 <- y / mu #residui
+alpha <- fit$fit$coef_est["shape"]
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.g2, type = "l", xlab = "", ylab = "", main = "Gamma residuals")
+
+#### ACF COMPARATE ####
+
+par(mfrow = c(1,2), mar = c(3, 4, 3, 4))
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.g1, lag.max = 50, main = "ACF Residui Gamma (1,1)")
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.g2, lag.max = 50, main = "ACF Residui Gamma (2,2)")
+
+```
+
+La specifica (2,2) presenta correlazioni dei residui marginalmente più basse rispetto alla parametrizzazione (1,1). In particolare, si osserva la completa attenuazione dell’autocorrelazione al lag 1. Inoltre, il correlogramma rileva la presenza di stagionalità ogni 22 lag. Tale fenomeno è verosimilmente riconducibile alla periodicità mensile del rollover dei contratti futures, che avviene solitamente ogni 22 giorni lavorativi. Nonostante questa componente stagionale residua, il valore trascurabile dei coefficienti di autocorrelazione (circa 0.04) suggerisce che il modello abbia filtrato adeguatamente la struttura di dipendenza dei dati.
+
+<!-- MODELLO 7: WEIBULL (2,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit7 <- gas(y = y, distr = "weibull", param = "rate", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit7 #Log-Likelihood: -14323.33, AIC: 28658.67, BIC: 28696.08
+
+```
+
+
+<!-- MODELLO 8: LOGNORMALE (2,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit8 <- gas(y = y, distr = "lognorm", param = "logmeanvar", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit8 #Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2
+     # il modello migliora il suo fit rispetto alla Gamma
+
+## calcolo delle radici del modello ##
+fit8$fit$coef_est #pos 4,5
+stime<-fit8$fit$coef_est
+radici<-polyroot(c(1,-stime[4], -stime[5] ))
+radici<-abs(radici)
+radici
+
+##commento: entrambe le radici del polinomio caratteristico (1.012041 , 1.518326) sono in modulo superiori a 1. dunque il modello soddisfa la stazionaerietà debole. Questo conferma che l'effetto dei passati shock non "esplode" nel tempo ma tende a rientrare, rendendo le previsioni statisticamente affidabili. ##
+
+```
+
+
+<!-- MODELLO 9: BURR (2,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit9 <- gas(y = y, distr = "burr", param = "scale", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit9 # Log-Likelihood: -13747.91, AIC: 27509.83, BIC: 27553.48
+
+```
+
+
+<!-- MODELLO 10: FISK (2,2)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit10 <- gas(y = y, distr = "fisk", param = "scale", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit10 #Log-Likelihood: -13748.47, AIC: 27508.94, BIC: 27546.35
+
+```
+
+Al fine di migliorare ulteriormente la bontà di adattamento, sono state testate altre distribuzioni condizionate coerenti alla tipologia dei dati: Weibull. LogNormale, Burr, Fisk. Per effettuare il confronto, come specifica di riferimento si è utilizzato ARMA(2,2). Di seguito, sono presentate le misure di adattamento:
+
+- Gamma (2,2) -> Log-Likelihood: -13792.27, AIC: 27596.55, BIC: 27633.96;
+- Weibull (2,2) -> Log-Likelihood: -14323.33, AIC: 28658.67, BIC: 28696.08;
+- LogNormale (2,2) -> Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2;
+- Burr (2,2) -> Log-Likelihood: -13747.91, AIC: 27509.83, BIC: 27553.48;
+- Fisk (2,2) -> Log-Likelihood: -13748.47, AIC: 27508.94, BIC: 27546.35.
+
+\vspace{3mm}
+
+Dal confronto tra le diverse specifiche, emerge che la distribuzione condizionata che si adatta meglio ai dati è la LogNormale.
+
+\vspace{3mm}
+
+Table 2 riporta la stima, lo standard error, la statistica test, il p-value e le radici AR del modello GAS(2,2) con distribuzione condizionata LogNormale.
+
+\vspace{3mm}
+
+| Parametro        |     Stima | Std. Error | Statistica Test |   p-value |
+|------------------|----------:|-----------:|----------------:|----------:|
+| logmean_omega    |  0.013318 | 0.0010233  | 13.015          | <2.2e-16  |
+| logmean_alpha1   |  0.029102 | 0.0017023  | 17.096          | <2.2e-16  |
+| logmean_alpha2   | -0.022600 | 0.0018277  | -12.366         | <2.2e-16  |
+| logmean_phi1     |  1.646722 | 0.0534096  | 30.832          | <2.2e-16  |
+| logmean_phi2     | -0.650783 | 0.0533017  | -12.209         | <2.2e-16  |
+| logvar           |  0.108287 | 0.0024819  | 43.632          | <2.2e-16  |
+|------------------|-----------|------------|-----------------|----------|
+| Radice AR 1      |  1.012041 |          - |               - |         - |
+| Radice AR 2      |  1.518326 |          - |               - |         - |
+
+: : Stima del Modello (2,2) con distribuzione condizionata LogNormale, regress = "joint" e scaling = "unit" 
+
+Infine, è stata condotta un'analisi di sensitività sulle specifiche tecniche dei modelli Gas. In particolare:
+
+- è stata testata l'opzione regress="sep", in alternativa alla configurazione "joint";
+- sono stati considerati approcci con un diverso fattore di scaling rispetto all'iniziale "unit", ovvero l'inversa della matrice d'informazione di Fisher("fisher_inv") e la sua radice quadrata ("fisher_inv_sqrt").
+
+\vspace{3mm}
+
+Tuttavia, l'analisi ha dimostrato che la scelta di tali elementi non influisce sulle performance del modello. Pertanto, sono state mantenute le impostazioni di partenza: regress="joint" e scale="unit".
+
+
+<!-- TEST SPECIFICHE TECNICHE  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+### IL TEST DELLE SPECIFICHE TECNICHE è STATO EFFETTUATO SUL MODELLO MIGLIORE AL MOMENTO: LOGNORMALE (2,2)
+
+## ARMA(2,2) LogNormale + "sep" ##
+
+fit8.1 <- gas(y = y, distr = "lognorm", param = "logmeanvar", 
+  x = NULL, regress = "sep",
+  p = 2L, q = 2L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit8.1
+
+## ARMA(2,2) LogNormale + "fisher_inv" ##
+
+fit8.2 <- gas(y = y, distr = "lognorm", param = "logmeanvar", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "fisher_inv",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit8.2
+
+## ARMA(2,2) LogNormale + "fisher_inv_sqrt" ##
+
+fit8.3 <- gas(y = y, distr = "lognorm", param = "logmeanvar", 
+  x = NULL, regress = "joint",
+  p = 2L, q = 2L, 
+  scaling = "fisher_inv_sqrt",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit8.3
+
+## RISULTATI ##
+
+# Modello 8: ARMA(2,2) LogNormale "joint" -> Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2
+# 
+# Modello 8.1: ARMA(2,2) Lognormale "sep" -> Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2
+# 
+# Modello 8.2: ARMA(2,2) LogNormale "fisher_inv" -> Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2
+# 
+# Modello 8.3: ARMA(2,2) LogNormale "fisher_inv_sqrt" -> Log-Likelihood: -13698.89, AIC: 27409.78, BIC: 27447.2
+
+# -> INVARIANTI!
+
+```
+
+# Diagnostica
+
+Considerando che le distribuzioni Gamma e LogNormale rappresentano le configurazioni più promettenti, e data la lieve divergenza riscontrata nella capacità di adattamento tra le specifiche (1,1) e (2,2), appare opportuno condurre una diagnostica comparativa dei 4 modelli candidati: Gamma(1,1), LogNormale(1,1), Gamma(2,2) e LogNormale(2,2).
+
+<!-- MODELLO 11: LOGNORMALE (1,1)  -->
+
+```{r}
+#| echo: false
+#| output: false
+
+fit11 <- gas(y = y, distr = "lognorm", param = "logmeanvar", 
+  x = NULL, regress = "joint",
+  p = 1L, q = 1L, 
+  scaling = "unit",
+  optim_arguments = list(opts = opts), print_progress = FALSE) 
+
+fit11 #Log-Likelihood: -13710.9, AIC: 27429.8, BIC: 27454.74
+
+```
+
+<!-- DIAGNOSTICA COMPARATA MODELLI + RILEVANTI : IMPOSTAZIONE -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#### GAMMA (1,1) ####
+fit <- fit2
+mu <- fitted(fit)
+eps.g1 <- y / mu #residui
+alpha <- fit$fit$coef_est["shape"]
+
+#### GAMMA (2,2) ####
+fit <- fit5
+mu <- fitted(fit)
+eps.g2 <- y / mu #residui
+alpha <- fit$fit$coef_est["shape"]
+
+#### LOGNORMALE (1,1) ####
+fit <- fit11
+mu <- fitted(fit)
+eps.ln1 <- y / mu #residui
+v <- fit$fit$coef_est["logvar"]
+
+#### LOGNORMALE (2,2) ####
+fit <- fit8
+mu <- fitted(fit)
+eps.ln2 <- y / mu #residui
+v <- fit$fit$coef_est["logvar"]
+
+```
+
+<!-- DIAGNOSTICA COMPARATA MODELLI + RILEVANTI : TS PLOT -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#### TS PLOT COMPARATI COMPARATE ####
+
+par(mfrow = c(2,2), mar = c(3, 2, 3, 2))
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.g1, type = "l", xlab = "", ylab = "", main = "Gamma residuals")
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.g2, type = "l", xlab = "", ylab = "", main = "Gamma residuals")
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.ln1, type = "l", xlab = "", ylab = "", main = "Lognorm residuals")
+
+## Serie storica dei residui moltiplicativi del modello ##
+#plot(x = date, y = eps.ln2, type = "l", xlab = "", ylab = "", main = "Lognorm residuals")
+
+```
+
+
+<!-- DIAGNOSTICA COMPARATA MODELLI + RILEVANTI : ACF -->
+
+```{r}
+#| echo: false
+#| fig-cap: "ACF Residui dei modelli considerati" 
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+#### ACF COMPARATE ####
+
+par(mfrow = c(2,2), mar = c(3, 2, 3, 2))
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.g1, lag.max = 50, main = "ACF Residui Gamma (1,1)")
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.g2, lag.max = 50, main = "ACF Residui Gamma (2,2)")
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.ln1, lag.max = 50, main = "ACF Residui LogNormale (1,1)")
+
+## Fac empirica dei residui moltiplicativi stimati dal modello GAMMA(1,1) ##
+Acf(x = eps.ln2, lag.max = 50, main = "ACF Residui LogNormale (2,2)")
+
+```
+
+Le funzioni di autocorrelazione mostrano che le parametrizzazioni Gamma hanno una maggiore efficacia nel mitigare l'autocorrelazione presente al lag 1, mentre le specifiche LogNormali sembrano gestire leggermente meglio la persistenza ciclica riscontrata ogni 22 lag.
+
+Si procede coi QQ-Plot, volti a verificare il grado di aderenza dei residui moltiplicativi empirici rispetto alle distribuzioni teoriche di riferimento.
+
+<!-- DIAGNOSTICA COMPARATA MODELLI + RILEVANTI : QQ-PLOT -->
+
+```{r}
+#| echo: false
+#| fig-cap: "QQ-Plot dei modelli considerati" 
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+#### Impostazioni 
+nobs <- NROW(y)
+prob <- seq(from = 1 / (nobs + 1), by = 1 / (nobs + 1), length.out = nobs) 
+
+#### Gamma
+eps.g.1.1 <- sort(eps.g1)
+qnt1 <- qgamma(p = prob, shape = alpha, rate = alpha)
+
+eps.g.2.2 <- sort(eps.g2)
+qnt2 <- qgamma(p = prob, shape = alpha, rate = alpha)
+
+#### LogNormal
+eps.ln1.1 <- sort(eps.ln1)
+qnt3 <- qlnorm(p = prob, meanlog = -v/2, sdlog = sqrt(v))
+
+eps.ln2.2 <- sort(eps.ln2)
+qnt4 <- qlnorm(p = prob, meanlog = -v/2, sdlog = sqrt(v))
+
+#### COMPARAZIONE QQ-PLOT ####
+
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1), pty = "s")
+
+#### 1. QQ-Plot Gamma ARMA(1,1)
+qqplot(x = qnt1, y = eps.g.1.1, 
+       main = "Gamma (1,1)",
+       xlim = c(0, 3),
+       xlab = "Theoretical quantiles", ylab = "Empirical quantiles")
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+#### 2. QQ-Plot Gamma ARMA(2,2)
+qqplot(x = qnt2, y = eps.g.2.2, 
+       main = "Gamma (2,2)",
+       xlim = c(0, 3),
+       xlab = "Theoretical quantiles", ylab = "Empirical quantiles")
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+#### 3. QQ-Plot Log-Normal ARMA(1,1)
+qqplot(x = qnt3, y = eps.ln1.1, 
+       main = "LogNormale (1,1)",
+       xlim = c(0, 3),
+       xlab = "Theoretical quantiles", ylab = "Empirical quantiles")
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+#### 4. QQ-Plot Log-Normal ARMA(2,2)
+qqplot(x = qnt4, y = eps.ln2.2, 
+       main = "LogNormale (2,2)",
+       xlim = c(0, 3),
+       xlab = "Theoretical quantiles", ylab = "Empirical quantiles")
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+# Ripristino la visualizzazione singola (opzionale)
+ par(mfrow = c(1, 1))
+
+```
+
+La Figure 4 evidenzia come entrambe le distribuzioni condizionate incontrino difficoltà nel modellare accuratamente la coda destra della distribuzione empirica. Tuttavia, il modello LogNormale risulta preferibile poiché la divergenza tra quantili teorici ed empirici si manifesta più tardi rispetto alla specifica Gamma. Questa maggiore capacità di seguire la dinamica dei valori estremi giustifica la maggiore bontà di adattamento osservata nel modello con distribuzione LogNormale. 
+
+# Previsioni
+
+## Analisi ex-post
+
+Sebbene la diagnostica condotta in precedenza evidenzi una superiorità statistica delle specifiche (2,2), nel contesto della previsione risulta interessante includere anche le parametrizzazioni (1,1), al fine di verificare se il vantaggio statistico riscontrato sia utile anche in termini previsivi.
+
+Per valutare la capacità predittiva di questi modelli vengono calcolate le previsioni ex-post relative al periodo dal "02-01-2025" al "28-01-2026".
+
+\vspace{3mm}
+
+<!-- PREVISIONI -->
+
+```{r}
+#| echo: false
+#| output: false
+
+#### Full data
+y.tot
+#### Impostazioni
+t_ahead <- 5   
+t_orig <- NROW(y) : (NROW(y.tot) - t_ahead)
+
+#### Previsioni ####
+
+## GAMMA (1,1)
+forec1<- .forecast(object = fit2, t_orig = t_orig, t_ahead = t_ahead, 
+  y = y.tot, xreg = NULL, method = "mean_path") 
+
+## LOGNORMALE (1,1)
+forec2 <- .forecast(object = fit11, t_orig = t_orig, t_ahead = t_ahead, 
+  y = y.tot, xreg = NULL, method = "mean_path")
+
+## GAMMA (2,2)
+forec3 <- .forecast(object = fit5, t_orig = t_orig, t_ahead = t_ahead, 
+  y = y.tot, xreg = NULL, method = "mean_path")
+
+## LOGNORMALE (2,2)
+forec4 <- .forecast(object = fit8, t_orig = t_orig, t_ahead = t_ahead, 
+  y = y.tot, xreg = NULL, method = "mean_path")
+
+```
+
+
+<!-- MISURE D'ERRORE --> 
+
+```{r}
+#| echo: false
+#| output: false
+
+rbind(
+  .forecast.ErrorMeasures(model = fit2$model$distr, y = y.tot, f = forec1),
+  .forecast.ErrorMeasures(model = fit11$model$distr, y = y.tot, f = forec2),
+  .forecast.ErrorMeasures(model = fit5$model$distr, y = y.tot, f = forec3),
+  .forecast.ErrorMeasures(model = fit8$model$distr, y = y.tot, f = forec4))
+
+```
+
+| Distribuzione condizionata | Orizzonte (h) |    MAE |    RMSE |   MAPE |   RMSPE |   LLE |
+|:---------------------------|-----------------:|-------:|--------:|-------:|--------:|--------:|
+| Gamma                      | 1                |  9.0505 | 14.3816 | 0.3163 | 0.4145 | 0.0725 |
+| Gamma                      | 2                |  9.4960 | 15.5481 | 0.3261 | 0.4353 | 0.0832 |
+| Gamma                      | 3                |  9.7529 | 16.1184 | 0.3371 | 0.4584 | 0.0930 |
+| Gamma                      | 4                | 10.0680 | 16.6257 | 0.3504 | 0.4804 | 0.1031 |
+| Gamma                      | 5                | 10.3735 | 17.0574 | 0.3596 | 0.4874 | 0.1127 |
+| LogNormale                 | 1                |  8.9449 | 14.5365 | 0.3073 | 0.3974 | 0.0734 |
+| LogNormale                 | 2                |  9.1707 | 15.3995 | 0.3116 | 0.4096 | 0.0825 |
+| LogNormale                 | 3                |  9.5312 | 16.0607 | 0.3257 | 0.4346 | 0.0933 |
+| LogNormale                 | 4                |  9.8735 | 16.5409 | 0.3387 | 0.4537 | 0.1033 |
+| LogNormale                 | 5                | 10.1776 | 16.9951 | 0.3480 | 0.4631 | 0.1125 |
+| Gamma                      | 1                |  9.3617 | 14.7185 | 0.3262 | 0.4330 | 0.0705 |
+| Gamma                      | 2                |  9.8528 | 15.8588 | 0.3391 | 0.4595 | 0.0809 |
+| Gamma                      | 3                | 10.2022 | 16.5382 | 0.3534 | 0.4889 | 0.0899 |
+| Gamma                      | 4                | 10.5785 | 17.1644 | 0.3691 | 0.5161 | 0.0988 |
+| Gamma                      | 5                | 10.9620 | 17.7461 | 0.3811 | 0.5258 | 0.1067 |
+| LogNormale                 | 1                |  9.0975 | 14.7273 | 0.3125 | 0.4068 | 0.0718 |
+| LogNormale                 | 2                |  9.4421 | 15.5824 | 0.3213 | 0.4245 | 0.0807 |
+| LogNormale                 | 3                |  9.8559 | 16.3101 | 0.3377 | 0.4546 | 0.0909 |
+| LogNormale                 | 4                | 10.2855 | 16.8771 | 0.3541 | 0.4772 | 0.0997 |
+| LogNormale                 | 5                | 10.6309 | 17.4272 | 0.3649 | 0.4887 | 0.1077 |
+
+: Misure di errore di previsioni per i modelli considerati (max(h) = 5)
+
+Le misure sintetizzate in Table 3 confermano la superiorità dei modelli Log-normali rispetto alle specifiche Gamma anche in sede previsiva. Tale dominanza si manifesta, in generale, per ogni misura d'errore e indipendentemente dall'orizzonte temporale. Tuttavia, è opportuno sottolineare che i margini di miglioramento, seppur sistematici, sono piuttosto lievi.
+
+
+<!-- VERIFICA: TEST DIEBOLD-MARIANO --> 
+
+```{r}
+#| echo: false
+#| output: false
+
+msg1 <- paste0(fit2$model$distr, " vs ", fit11$model$distr)  ##GAMMA(1,1) VS LOGNORMALE(1,1)
+msg2 <- paste0(fit5$model$distr, " vs ", fit8$model$distr)   ##GAMMA(2,2) VS LOGNORMALE(2,2)
+msg3 <- paste0(fit11$model$distr, " vs ", fit8$model$distr)  ##LOGNORMALE(1,1) VS LOGNORMALE(2,2)
+msg4 <- paste0(fit2$model$distr, " vs ", fit5$model$distr)   ##GAMMA(1,1) VS GAMMA(2,2)
+
+.DieboldMariano(y = y.tot, forec1 = forec1, forec2 = forec2, 
+  loss = c("SE", "AE", "LLE"), msg = msg1)
+.DieboldMariano(y = y.tot, forec1 = forec3, forec2 = forec4, 
+  loss = c("SE", "AE", "LLE"), msg = msg2)
+.DieboldMariano(y = y.tot, forec1 = forec2, forec2 = forec4, 
+  loss = c("SE", "AE", "LLE"), msg = msg3)
+.DieboldMariano(y = y.tot, forec1 = forec2, forec2 = forec4, 
+  loss = c("SE", "AE", "LLE"), msg = msg4)
+
+```
+
+Dal test di Diebold-Mariano emerge come la lieve superiorità previsiva osservata nei modelli LogNormali non presenti rilevanza statistica. In altre parole, le abilità predittive dei modelli Gamma e Lognormale con stessa specificazione non sono statisticamente diverse, con eccezioni limitate a orizzonti temporali brevi e alla metrica dell’Errore Assoluto (AE).
+
+\vspace{3mm}
+
+| Confronto                  | Misura | Orizzonte (h) | Statistica DM |
+|-----------------------------|--------|-------------------|---------------|
+| Gamma vs LogNormale         | SE     | 1                 | -0.4932       |
+| Gamma vs LogNormale         | AE     | 1                 | 0.7494        |
+| Gamma vs LogNormale         | LLE    | 1                 | -0.7083       |
+| Gamma vs LogNormale         | SE     | 2                 | 0.5230        |
+| Gamma vs LogNormale         | AE     | 2                 | 2.0249        |
+| Gamma vs LogNormale         | LLE    | 2                 | 0.1181        |
+| Gamma vs LogNormale         | SE     | 3                 | 0.2124        |
+| Gamma vs LogNormale         | AE     | 3                 | 1.4450        |
+| Gamma vs LogNormale         | LLE    | 3                 | -0.3391       |
+| Gamma vs LogNormale         | SE     | 4                 | 0.3428        |
+| Gamma vs LogNormale         | AE     | 4                 | 1.2493        |
+| Gamma vs LogNormale         | LLE    | 4                 | -0.3445       |
+| Gamma vs LogNormale         | SE     | 5                 | 0.2583        |
+| Gamma vs LogNormale         | AE     | 5                 | 1.2047        |
+| Gamma vs LogNormale         | LLE    | 5                 | -0.3826       |
+
+: Risultati del test di Diebold-Mariano: Gamma(2,2) vs LogNormale (2,2)
+
+
+Inoltre, i risultati del test presentati in Table 5 confermano che i modelli più complessi hanno abilità predittive statisticamente migliori rispetto a quelli più parsimoniosi.
+
+\vspace{3mm}
+
+| Confronto                  | Misura | Orizzonte (h) | Statistica DM |
+|-----------------------------|--------|-------------------|---------------|
+| LogNormale vs LogNormale    | SE     | 1                 | 1.5642        |
+| LogNormale vs LogNormale    | AE     | 1                 | 2.2158        |
+| LogNormale vs LogNormale    | LLE    | 1                 | 1.6915        |
+| LogNormale vs LogNormale    | SE     | 2                 | 1.0344        |
+| LogNormale vs LogNormale    | AE     | 2                 | 2.4998        |
+| LogNormale vs LogNormale    | LLE    | 2                 | 1.4514        |
+| LogNormale vs LogNormale    | SE     | 3                 | 1.1760        |
+| LogNormale vs LogNormale    | AE     | 3                 | 2.1633        |
+| LogNormale vs LogNormale    | LLE    | 3                 | 1.5232        |
+| LogNormale vs LogNormale    | SE     | 4                 | 1.5210        |
+| LogNormale vs LogNormale    | AE     | 4                 | 2.3219        |
+| LogNormale vs LogNormale    | LLE    | 4                 | 2.1492        |
+| LogNormale vs LogNormale    | SE     | 5                 | 1.9369        |
+| LogNormale vs LogNormale    | AE     | 5                 | 2.4845        |
+| LogNormale vs LogNormale    | LLE    | 5                 | 3.0295        |
+
+: Risultati del test di Diebold-Mariano: Lognormale (1,1) vs LogNormale (2,2)
+
+
+Sebbene gli ultimi risultati suggeriscano un'equivalente potere predittivo tra Gamma e LogNormale, alla luce della superiorità statistica evidenziata dal BIC e della migliore aderenza alla coda destra della distribuzione empirica emersa dai QQ-plot, si è scelto il modello LogNormale (2,2) come specifica ottimale per la generazione delle previsioni ex-ante. 
+
+## Previsioni ex-ante
+
+L'obiettivo è cercare di prevedere quale possa essere l'andamento della volatilità dei prezzi del petrolio greggio negli Stati Uniti. 
+
+```{r}
+#| echo: false
+#| output: false
+
+library(timeDate)
+
+fit <- fit8
+H <- 22  ##giorni lavorativi successivi: dal 29-01-2026 al 02-03-2026
+
+#ultima data della serie storica
+last_date <- date.tot[NROW(date.tot)]
+
+# sequenza di date solari più lunga del necessario  per coprire i weekend in un anno
+date_all <- seq(from = last_date + 1, by = "day", length.out = H * 1.6)
+
+# festività del NYSE (Borsa di New York) per il 2026 e 2027
+festivita_usa <- as.Date(holidayNYSE(2026))
+
+# 4. Filtriamo la sequenza tenendo solo i giorni feriali
+date.ex_ante <- date_all[!(format(date_all, "%u") %in% c("6", "7")) & 
+                         !(date_all %in% festivita_usa)]
+date.ex_ante <- date.ex_ante[1:H]
+date.ex_ante
+
+forec.ex_ante <- gas_forecast(gas_object = fit, method = "simulated_paths",
+  x_ahead = NULL, t_ahead = H, rep_ahead = 100000L, quant = c(0.025, 0.975))
+
+```
+
+
+```{r}
+#| echo: false
+#| fig-cap: "Previsione ex-ante" 
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+ylim <- c(0, max(forec.ex_ante$forecast$y_ahead_quant, na.rm = TRUE))
+plot(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_mean, type = "l", 
+  col = "red", ylim = ylim, xlab = "Previsione ex-ante della Volatilità (22gg)",
+  ylab = "Volatilità Stimata Garman-Klass",
+  main = "Previsione ex-ante",
+  xaxt = "n") # Elimina l'asse X automatico che crea sovrapposizioni
+axis.Date(1, at = seq(min(date.ex_ante), max(date.ex_ante), by = "week"), 
+          format = "%d %b %y")
+lines(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_quant[, 1], 
+  col = "red", lty = 2)
+lines(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_quant[, 2], 
+  col = "red", lty = 2)
+
+## serie storica della volatilità garman-klass:
+#plot(x = date.tot, y = y.tot, type = "l", xlab = "", ylab = "", main = "Ts plot Garrman-Klass Petrolio")
+#plot(x = date.tot[3000:4042], y = y.tot[3000:4042], type = "l", xlab = "", ylab = "", main = "Ts plot Garman-Klass Petrolio")
+
+# ### verifica y.tot (motivo per cui la stima puntuale cresce da 20 a 30 nella previsione ex_ante annuale) ###
+# summary(y.tot)  #distribuzione volatilità garman-klass: media=31.936
+# y.tot[4042] #ultima oss, all'origine T=24.91548 -> COMPORTAMENTO STIMA PUNTUALE COERENTE
+
+```
+
+La Figure 5 mostra le previsioni per il mese finanziario successivo, nello specifico dal "29-01-2026" al "02-03-2026". Il metodo applicato per calcolare le previsioni ("simulated_paths") non è analitico, per questo il grafico prodotto mostra fluttuazioni prive di significato economico, dettate solo dal "rumore" statistico delle simulazioni. Per mitigare tale artefatto, è stato elevato il numero di iterazioni, garantendo comunque l'efficienza computazionale. Poiché l'ultimo valore osservato (24.915) risulta inferiore al valore atteso incondizionato della volatilità (pari a 31.936), il modello proietta un progressivo riallineamento della serie verso il suo equilibrio teorico. In altre parole, questa situazione determina il trend moderatamente crescente della stima puntuale. Per quanto riguarda l'intervallo di confidenza, mentre la banda inferiore rimane piatta e stabile a valore 10, la banda superiore, al crescere dell'orizzonte temporale, si allontana sempre di più dalla stima puntuale. Dunque, il modello segnala che la volatilità del petrolio potrà essere soggetta a spike improvvisi e relativamente violenti verso l'alto durante il mese prossimo,  confermando la natura rischiosa dell'asset finanziario.
+
+# Conclusioni
+
+L'analisi ha esaminato la volatilità del prezzo dei contratti futures del petrolio greggio negli Stati Uniti, considerando le osservazioni da "04-01-2010" al "28-01-2026", con l'obiettivo di costruire un modello in grado di fornire previsioni accurate per l'intero mese successivo. Per questo sono stati testati diversi modelli GAS con distribuzioni condizionate differenti, confrontandone bontà di adattamento e accuratezza previsionale.
+
+La specifica che fornisce il miglior compromesso tra bontà di adattamento, complessità del modello e controllo dei residui è il modello GAS (2,2) con distribuzione condizionata LogNormale, senza l'utilizzo di regressori esterni. Per questo motivo, tale parametrizzazione è stata utilizzata per la previsione ex-ante.
+
+
+\newpage
+
+\section*{Appendice}
+
+\vspace{5mm}
+
+| Parametro        |     Stima | Std. Error | Statistica Test |   p-value |
+|------------------|----------:|-----------:|----------------:|----------:|
+| log(rate)_omega  | -0.026532 | 0.0047332  | -5.6056         | 2.075e-08 |
+| log(rate)_alpha1 |  0.023771 | 0.0013943  | 17.0495         | <2.2e-16  |
+| log(rate)_phi1   |  0.977055 | 0.0038125  | 256.2788        | <2.2e-16  |
+| shape            |  9.038364 | 0.2042912  | 44.2426         | <2.2e-16  |
+
+: Stima del Modello (1,1) con distribuzione condizionata Gamma, regress = "joint" e scaling = "unit" 
+
+\vspace{5mm}
+
+| Parametro        |     Stima | Std. Error | Statistica Test |   p-value |
+|------------------|----------:|-----------:|----------------:|----------:|
+| logmean_omega    |  0.066015 | 0.0122725  | 5.3791          | 2.075e-08 |
+| logmean_alpha1   |  0.025179 | 0.0014973  | 16.8171         | <2.2e-16  |
+| logmean_phi1     |  0.979943 | 0.0036507  | 268.4290        | <2.2e-16  |
+| logvar           |  0.108979 | 0.0025075  | 43.4612         | <2.2e-16  |
+
+: Stima del Modello (1,1) con distribuzione condizionata Lognormale, regress = "joint" e scaling = "unit"
+
+\vspace{5mm}
+
+| Confronto                 | Misura | Orizzonte (h)  | Statistica DM |
+|-----------------------------|--------|-------------------|---------------|
+| Gamma vs Lognormale         | SE     | 1                 | -0.025759     |
+| Gamma vs Lognormale         | AE     | 1                 | 1.722874      |
+| Gamma vs Lognormale         | LLE    | 1                 | -0.400673     |
+| Gamma vs Lognormale         | SE     | 2                 | 0.674016      |
+| Gamma vs Lognormale         | AE     | 2                 | 1.938870      |
+| Gamma vs Lognormale         | LLE    | 2                 | 0.260462      |
+| Gamma vs Lognormale         | SE     | 3                 | 0.570775      |
+| Gamma vs Lognormale         | AE     | 3                 | 1.607752      |
+| Gamma vs Lognormale         | LLE    | 3                 | -0.078715     |
+| Gamma vs Lognormale         | SE     | 4                 | 0.738803      |
+| Gamma vs Lognormale         | AE     | 4                 | 1.298270      |
+| Gamma vs Lognormale         | LLE    | 4                 | -0.039420     |
+| Gamma vs Lognormale         | SE     | 5                 | 0.855378      |
+| Gamma vs Lognormale         | AE     | 5                 | 1.380085      |
+| Gamma vs Lognormale         | LLE    | 5                 | 0.086751      |
+
+: Risultati del test di Diebold-Mariano: Gamma (1,1) vs LogNormale (1,1)
+
+\vspace{5mm}
+
+| Confronto                   | Misura | Orizzonte (h) | Statistica DM |
+|-----------------------------|--------|-------------------|---------------|
+| Gamma vs Gamma              | SE     | 1                 | 1.564291      |
+| Gamma vs Gamma              | AE     | 1                 | 2.215865      |
+| Gamma vs Gamma              | LLE    | 1                 | 1.691564      |
+| Gamma vs Gamma              | SE     | 2                 | 1.034429      |
+| Gamma vs Gamma              | AE     | 2                 | 2.499834      |
+| Gamma vs Gamma              | LLE    | 2                 | 1.451492      |
+| Gamma vs Gamma              | SE     | 3                 | 1.176084      |
+| Gamma vs Gamma              | AE     | 3                 | 2.163350      |
+| Gamma vs Gamma              | LLE    | 3                 | 1.523274      |
+| Gamma vs Gamma              | SE     | 4                 | 1.521063      |
+| Gamma vs Gamma              | AE     | 4                 | 2.321972      |
+| Gamma vs Gamma              | LLE    | 4                 | 2.149218      |
+| Gamma vs Gamma              | SE     | 5                 | 1.936970      |
+| Gamma vs Gamma              | AE     | 5                 | 2.484506      |
+| Gamma vs Gamma              | LLE    | 5                 | 3.029538      |
+
+: Risultati del test di Diebold-Mariano: Gamma (1,1) vs Gamma (2,2)
+
+\vspace{5mm}
+
+```{r}
+#| echo: false
+#| fig-cap: "Grafico Filtro di Kalman"
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+graficokalman <- readRDS("kalman.rds")
+plot(graficokalman) 
+
+```
+
+
+
+
