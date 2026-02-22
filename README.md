@@ -6,7 +6,6 @@ Progetto corso universitario 2026. Analisi e previsione della volatilità dei fu
 Questo progetto si occupa di esaminare la volatilità del prezzo dei contratti futures del petrolio greggio negli Stati Uniti, con l'obiettivo di costruire un modello statistico in grado di prevederne le fluttuazioni per il mese finanziario successivo.
 
 ## 📋 Panoramica del Progetto
-* **Autore**: Luca Solito
 * **Obiettivo**: Prevedere l'intensità delle fluttuazioni della volatilità per il mese successivo.
 * **Dati**: Prezzi giornalieri in dollari/barile dei futures del petrolio greggio statunitense estratti da Yahoo Finance.
 * **Periodo**: Dal 04-01-2010 al 28-01-2026 (4042 osservazioni).
