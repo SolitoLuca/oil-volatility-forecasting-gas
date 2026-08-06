@@ -85,7 +85,7 @@ L’obiettivo dell’analisi è esaminare la volatilità del prezzo dei contratt
 
 ## carica file sempre cosi senno ogni volta si oggiorna con i nuovi dati giornalieri ##
 
-file <- "C://Users//lucas//Desktop//petrolio_greggio.csv"
+file <- "C://Users//lucas//Desktop//LAUREA MAGISTRALE//MARKETING CIPOLLINI//PROGETTO//petrolio_greggio.csv"
 data <- read.table(file = file, header = TRUE, sep = ",",
   na.strings = ".", check.names = FALSE)
 data$date <- as.Date(data$date, "%Y-%m-%d") #converte la data del file in un formato leggibile a R
@@ -979,7 +979,7 @@ L'obiettivo è cercare di prevedere quale possa essere l'andamento della volatil
 library(timeDate)
 
 fit <- fit8
-H <- 22  ##giorni lavorativi successivi: dal 29-01-2026 al 02-03-2026
+H <- 30  ##giorni lavorativi successivi: dal 29-01-2026 al 02-03-2026
 
 #ultima data della serie storica
 last_date <- date.tot[NROW(date.tot)]
@@ -1039,6 +1039,115 @@ La Figure 5 mostra le previsioni per il mese finanziario successivo, nello speci
 L'analisi ha esaminato la volatilità del prezzo dei contratti futures del petrolio greggio negli Stati Uniti, considerando le osservazioni da "04-01-2010" al "28-01-2026", con l'obiettivo di costruire un modello in grado di fornire previsioni accurate per l'intero mese successivo. Per questo sono stati testati diversi modelli GAS con distribuzioni condizionate differenti, confrontandone bontà di adattamento e accuratezza previsionale.
 
 La specifica che fornisce il miglior compromesso tra bontà di adattamento, complessità del modello e controllo dei residui è il modello GAS (2,2) con distribuzione condizionata LogNormale, senza l'utilizzo di regressori esterni. Per questo motivo, tale parametrizzazione è stata utilizzata per la previsione ex-ante.
+
+# Update 06.03.2026
+
+Capiamo come si è comportato il modello rispetto ai dati osservati, che solo ad oggi potevano essere disponibili.
+
+```{r}
+#| echo: false
+#| output: false
+
+## confronto previsioni ex-ante con osservazioni adesso note (update 06.03.2026)
+
+
+library(quantmod)
+data.xts.nuovo<-getSymbols("CL=F",src= "yahoo", from = "2026-01-29", to ="2026-03-07", auto.assign = FALSE)
+
+data.nuovo<-data.frame(Date=index(data.xts.nuovo),coredata(data.xts.nuovo))
+summary(data.nuovo)
+data.nuovo<-data.nuovo[,-7] #eliminata ultima va (non serve)
+colnames(data.nuovo)<-c("date","open","high","low","close","volume")
+
+summary(data.nuovo)
+#View(data.nuovo)
+#str(data)
+
+# Salvo dataset in un file CSV:
+write.csv(data.nuovo, file = "petrolio_greggio_nuovo.csv", row.names = FALSE)
+
+# Per verificare dove è stato salvato il file:
+getwd()
+
+## carica file sempre cosi senno ogni volta si oggiorna con i nuovi dati giornalieri ##
+
+file <- "C://Users//lucas//Desktop//LAUREA MAGISTRALE//MARKETING CIPOLLINI//PROGETTO//petrolio_greggio_nuovo.csv"
+data.nuovo <- read.table(file = file, header = TRUE, sep = ",",
+  na.strings = ".", check.names = FALSE)
+data.nuovo$date <- as.Date(data.nuovo$date, "%Y-%m-%d") #converte la data del file in un formato leggibile a R
+str(data.nuovo)
+View(data.nuovo)
+
+## calcolo stima di volatilità garman klass sui dati nuovi ##
+
+
+## Funzione Garman-Klass ##
+calculate_gk <- function(h, l, o, c) {
+  # Protezione contro prezzi <= 0
+  if(any(c(h, l, o, c) <= 0)) return(NA)
+  
+  part1 <- 0.5 * (log(h/l))^2
+  part2 <- (2 * log(2) - 1) * (log(c/o))^2
+  return(sqrt(part1 - part2) * sqrt(252) * 100)
+}
+gk.nuovo <- mapply(calculate_gk, data.nuovo$high, data.nuovo$low, data.nuovo$open, data.nuovo$close)
+
+
+```
+
+```{r}
+#| echo: false
+#| fig-cap: "Previsione ex-ante vs dati osservati" 
+#| fig-align: center
+#| fig.width: 10
+#| fig.height: 6
+
+# --- 3. Creazione del Grafico di Confronto ---
+
+# Calcoliamo i limiti dell'asse Y per includere sia le previsioni che i dati reali
+ylim_comp <- c(0, max(c(forec.ex_ante$forecast$y_ahead_quant, gk.nuovo), na.rm = TRUE))
+
+# Plot della Media Previsionale (Linea Rossa Continua)
+plot(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_mean, type = "l", 
+     col = "red", lwd = 2, ylim = ylim_comp, 
+     xlab = "Data (Gennaio - Marzo 2026)", 
+     ylab = "Volatilità Garman-Klass",
+     main = "Backtesting Volatilità: Prevista vs Osservata",
+     xaxt = "n")
+
+# Aggiunta asse delle date personalizzato
+axis.Date(1, at = seq(min(date.ex_ante), max(date.ex_ante), by = "week"), 
+          format = "%d %b %y")
+
+# Aggiunta Intervalli di Confidenza (Linee Rosse Tratteggiate)
+lines(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_quant[, 1], col = "red", lty = 2)
+lines(x = date.ex_ante, y = forec.ex_ante$forecast$y_ahead_quant[, 2], col = "red", lty = 2)
+
+# AGGIUNTA DEI DATI OSSERVATI (Linea Blu con punti)
+# Usiamo i dati calcolati dal dataset scaricato (data.nuovo)
+lines(x = data.nuovo$date, y = gk.nuovo, type = "b", col = "blue", pch = 16, lwd = 1)
+
+# Aggiunta della Legenda
+legend("topleft", 
+       legend = c("Prevista (Mean)", "IC 95% (Forecast)", "Osservata (Realized GK)"),
+       col = c("red", "red", "blue"), 
+       lty = c(1, 2, 1), 
+       pch = c(NA, NA, 16), 
+       lwd = c(2, 1, 1),
+       bg = "white", cex = 0.8)
+
+# Opzionale: Aggiunta di una griglia per migliore leggibilità
+grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+```
+
+
+Il modello di previsione ha dimostrato performance solide e affidabili per i primi 22 giorni dell'orizzonte temporale analizzato, per poi perdere capacità predittiva a causa di un prolungamento della finestra di analisi coinciso con l'improvviso shock geopolitico in Iran.
+
+Nelle prime tre settimane dell'orizzonte previsivo (fino al 22 febbraio circa), il modello ha evidenziato una notevole precisione statistica. La volatilità realizzata si è mantenuta stabilmente all'interno delle bande di confidenza al 95%, fluttuando in modo coerente attorno alla media previsionale. In questa fase, la specificazione adottata è riuscita a catturare in modo eccellente la componente endogena del mercato, in particolare il fenomeno della persistenza della volatilità (volatility clustering) insito nelle serie storiche analizzate. La forte coerenza tra i dati osservati e gli intervalli di previsione conferma che, in assenza di shock esterni di rilievo, il modello risulta adeguatamente calibrato per la stima del rischio nel breve-medio periodo.
+
+A partire dalla quarta settimana (fine febbraio 2026), si è registrata una netta e violenta divergenza tra la serie prevista e quella effettivamente osservata. In corrispondenza dell'escalation bellica in Iran, la volatilità calcolata tramite lo stimatore di Garman-Klass ha subito un'impennata verticale, violando il limite superiore dell'intervallo di confidenza e superando quota 100.
+
+Da un punto di vista econometrico, questo fenomeno è classificabile come una rottura strutturale (structural break) innescata da uno shock geopolitico puramente esogeno. L'incapacità del modello di anticipare tale picco non è imputabile a un difetto di calibrazione, bensì ai limiti intrinseci di qualsiasi stima ex-ante. Questo evento estremo evidenzia una caratteristica fondamentale dei modelli della classe GAS: data la loro natura puramente reattiva alle dinamiche passate, la gestione di shock macroeconomici di tale magnitudo richiederebbe un aggiornamento continuo dei parametri, ad esempio tramite un approccio a finestre mobili (rolling forecast), per ricalibrare tempestivamente le proiezioni.
 
 
 \newpage
