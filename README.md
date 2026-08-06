@@ -21,6 +21,7 @@ Questo progetto si occupa di esaminare la volatilità del prezzo dei contratti f
 * **Stagionalità**: È stata rilevata una componente ciclica ogni 22 giorni lavorativi, legata al rollover mensile dei contratti futures.
 * **Previsioni Ex-ante**: Il modello proietta un progressivo riallineamento verso l'equilibrio teorico (media incondizionata $\approx 31.936$).
 * **Rischio**: L'analisi evidenzia la possibilità di spike improvvisi e violenti verso l'alto, confermando la natura rischiosa dell'asset.
+* **Update 06.03.2026**: Confrontati i risultati del modello previsivo ex-ante con i dati osservati reali adesso disponibili, caratterizzati dallo shock esogeno derivato dalla chiusura dello stretto di Hormuz.
 
 ## 📁 Struttura dei File
 * Progetto_Volatilità_Petrolio.pdf`: Report finale dettagliato.
